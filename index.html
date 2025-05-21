@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Rethinking Restrictions: From SQL to Graph</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 960px;
+      margin: 40px auto;
+      line-height: 1.6;
+      padding: 0 20px;
+    }
+    h1, h2, h3 {
+      color: #222;
+    }
+    code {
+      background: #f2f2f2;
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-family: monospace;
+    }
+    pre {
+      background: #f8f8f8;
+      padding: 10px;
+      overflow-x: auto;
+    }
+    img {
+      max-width: 100%;
+      margin: 20px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background: #f0f0f0;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Rethinking Restrictions: From SQL to Graph</h1>
+
+<h2>Introduction</h2>
+<p>Over the past few years, the Restrictions product has been the source of repeated P1 production incidents, despite heavy investment in development and testing. These failures aren't caused by technical debt — they stem from fundamental design decisions. I originally architected Restrictions as a relational model within SQL Server, but as the product and its business logic have evolved, I’ve come to the conclusion that we are using the wrong technology for the job.</p>
+
+<p>In this post, I walk through the evolution of Restrictions, the current architecture, and the challenges that arise from trying to simulate graph traversal using a relational model. Then, I present a compelling case for moving Restrictions into a graph database — a model far more suited to the relationships and reasoning this product depends on.</p>
+
+<h2>Background</h2>
+<p>Restrictions is one of the most business-critical features within Quest. It protects us from reputational and legal risk by ensuring our consultants do not engage with individuals who are off-limits, under embargo, or already engaged. It began with a simple goal — determine if someone is restricted — but the business logic has expanded significantly. We now support over 22 types of restrictions and must handle complex cases like reservations, job functionality, company structures, and M&A-driven hierarchy changes.</p>
+
+<p>The original system relied on SQL stored procedures to infer restriction state by joining large numbers of tables with temporal and conditional logic. This worked when the problem was small. But today, it’s clear that SQL Server is fundamentally unsuited to accurately, consistently, and efficiently answering the question: <em>“Is this person restricted right now?”</em></p>
+
+<h2>Current Architecture and Challenges</h2>
+<p>The current system uses two master stored procedures — one for people, one for companies — which recursively join tables, traverse parent/child company relationships, and recalculate every restriction every time. This includes:</p>
+<ul>
+  <li>OffLimits rules based on company, job function, or job category</li>
+  <li>Reservations linked via assignments or roles</li>
+  <li>Direct Restrictions like Do Not Contact or Conversation Required</li>
+</ul>
+
+<p>This approach has major downsides:</p>
+<ul>
+  <li>Recalculations happen even when nothing has changed</li>
+  <li>Jobs and roles are joined repeatedly with filters and flags</li>
+  <li>Historical data and current state coexist in the same tables</li>
+  <li>Company structure traversal is recursive and expensive (e.g. Barclays has 495 children)</li>
+</ul>
+
+<p>We tried to patch over the flaws with a “real-time badge” system, but that in itself has added 247,000 entries to a tracking table in production. These layers of indirection, compensating logic, and runtime patching are signals of a flawed design pattern.</p>
+
+<h2>What Makes This Hard</h2>
+<p>Restrictions logic requires graph traversal. Whether it’s checking if a job falls under a company-wide off-limit, or whether a person’s placement still binds them within a company family tree, the underlying data model is a <strong>graph of entities and relationships</strong>. But in SQL Server, those relationships are implicit, not native. We simulate them through joins and recursive CTEs.</p>
+
+<p>Every production incident over the past three years has followed a familiar theme: the system fails to recognize a restriction due to complexity in traversing jobs, companies, and roles. These failures have high reputational impact and take considerable effort to debug.</p>
+
+<h2>Why Graph?</h2>
+<p>Graph databases are purpose-built for these kinds of problems. Instead of joining rows, they follow relationships. Nodes represent people, companies, jobs, restrictions. Relationships like <code>WORKS_AT</code>, <code>PLACED_IN</code>, or <code>COVERED_BY</code> explicitly model the connections we care about.</p>
+
+<p>Traversal in a graph is lightweight and constant-time per hop — whether you're 2 or 20 levels deep in a company structure. We don’t have to re-derive anything. We just ask: <em>“Can I navigate from this Person node to a Restriction node?”</em> If yes, the person is restricted.</p>
+
+<h3>Benefits</h3>
+<ul>
+  <li>Simplified logic — no more multi-join SQL</li>
+  <li>Accurate modeling of business rules</li>
+  <li>Linear scaling with complexity</li>
+  <li>Real-time restriction status without recalculation</li>
+  <li>Eliminates need to persist interpreted state (badge snapshot)</li>
+</ul>
+
+
+
+<h2>SQL vs Graph: A Side-by-Side Comparison</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Aspect</th>
+      <th>Relational (SQL Server)</th>
+      <th>Graph (Neo4j)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Data Structure</td>
+      <td>Tables joined by foreign keys</td>
+      <td>Nodes and relationships</td>
+    </tr>
+    <tr>
+      <td>Traversal</td>
+      <td>Requires recursive joins and CTEs</td>
+      <td>Direct and native — follow edges</td>
+    </tr>
+    <tr>
+      <td>Restriction Evaluation</td>
+      <td>Recalculated with every query or persisted snapshot</td>
+      <td>Inferred instantly from graph structure</td>
+    </tr>
+    <tr>
+      <td>Debugging</td>
+      <td>Hard to trace joins or CASE logic</td>
+      <td>Each edge is a visible path</td>
+    </tr>
+    <tr>
+      <td>Performance</td>
+      <td>Degrades with complexity and size</td>
+      <td>Linear with depth, constant-time per hop</td>
+    </tr>
+    <tr>
+      <td>Maintainability</td>
+      <td>Large stored procedures, fragile to schema change</td>
+      <td>Schema-free traversal, declarative Cypher queries</td>
+    </tr>
+    <tr>
+      <td>Suitability</td>
+      <td>Best for tabular data, not relationships</td>
+      <td>Ideal for interconnected, rule-based systems</td>
+    </tr>
+  </tbody>
+</table>
+
+
+
+<h2>Real-World Example</h2>
+<p>In Neo4j, we can model a Person who holds a Job at a Company. That company is part of a parent hierarchy, and at the top sits a Worldwide OffLimit. If all nodes and relationships are in place, the graph tells us this person is covered — no stored proc required.</p>
+
+<p>When a job ends, we remove that node — the graph updates automatically. When a WWOL expires, we remove the edge — all associated people are instantly unaffected. No reprocessing. No snapshot table. No recursion.</p>
+
+<h2>Operationalizing This</h2>
+<p>We would use Event Streaming from SQL Server to maintain the graph. Only relevant changes (e.g. job current flag toggles) would trigger updates. Graph changes are fast, append-only, and logged. I’ve already used this approach in EventStream to map foreign key relationships to root entities.</p>
+
+<p>Neo4j is the ideal fit for this. It’s mature, widely supported, and already proven in our environment. We could host it ourselves or use GrapheneDB as a managed provider. The existing restriction APIs could be refactored to call the graph service directly, removing the need for persistent badge tables or recalculation logic.</p>
+
+<h2>Why This Is the Right Move</h2>
+<ul>
+  <li><strong>It’s accurate</strong>: we no longer approximate logic with code</li>
+  <li><strong>It’s testable</strong>: every hop and relationship is visible</li>
+  <li><strong>It’s maintainable</strong>: fewer lines of logic, more domain alignment</li>
+  <li><strong>It’s scalable</strong>: restrictions logic remains constant even as data grows</li>
+  <li><strong>It’s finished</strong>: we stop playing whack-a-mole with edge cases</li>
+</ul>
+
+<h2>Conclusion</h2>
+<p>The current Restrictions system is a patchwork of stored procedures, recursive joins, runtime recalculation, and workaround flags. We’ve stretched the relational model beyond what it was designed for. Restrictions is a graph problem, and we should solve it with graph technology.</p>
+
+<p>I architected the current solution, and I’ve lived through every production incident that followed. I now believe that fully migrating Restrictions to a graph database — powered by clean event streaming from our transactional system — is the only way to close this out with confidence.</p>
+
+<p>This move would modernize the product, improve accuracy, reduce dev effort, and future-proof the platform. It’s the right design for the logic we now own.</p>
+
+<hr>
+<p><em>Authored by John Murphy • GitHub: [your-handle] • LinkedIn: [your-link]</em></p>
+
+</body>
+</html>
