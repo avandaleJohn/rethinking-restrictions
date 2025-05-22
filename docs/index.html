@@ -48,7 +48,15 @@
 
 <h1>Rethinking Restrictions: From SQL to Graph</h1>
 
-<h2>Introduction</h2>
+<h2>Introduction</h2>`
+<p>
+  This post explains the evolution of a mission-critical system built to enforce hiring restrictions at a global executive recruitment firm. It dives into the technical challenges of modeling restrictions across large hierarchical companies and why traditional relational models proved inadequate.
+
+</p>
+
+<p>
+  A “restriction” refers to a contractual or ethical limitation on who can be contacted. These fall into categories such as “Do Not Contact” (e.g., for legal reasons), “Reservation” (temporary holds), or “Off-Limits” (e.g., due to recent business engagements).
+</p>
 <p>One of the most complex projects I worked on was the Restrictions system at a global executive recruitment firm. </p> 
 <p>The system was designed to enforce legal and reputational safeguards by ensuring the firm did not contact individuals covered by contractual hiring restrictions. </p>
 <p>For example, if hired to find a CEO for a multinational bank like Barclays, the firm might agree not to approach any marketing managers globally for a set duration.
@@ -56,6 +64,64 @@
 <p>While the front-end representation was a simple restriction flag, the back-end logic was highly complex. The system had to process deeply nested company hierarchies and normalized relational database structures, tracking roles, departments, and job histories of individuals.
 
   <img src="assets/company-structure.png" alt="Company Structure">
+
+  <section id="example-walkthrough">
+    <h2>Example Walkthrough: Evaluating a Restriction</h2>
+  
+    <p>Let’s walk through a real-world scenario to illustrate how the current system determines whether a candidate is restricted from contact.</p>
+  
+    <h3>Scenario</h3>
+    <p>Your firm has been engaged to find the new <strong>Chief Marketing Officer</strong> for a major client: <strong>Barclays PLC</strong>. Before reaching out to any candidates, the system must confirm that the person is not restricted. One of the potential candidates is <strong>Jane Doe</strong>, currently a <em>Marketing Director at Barclays UK</em>.</p>
+  
+    <h3>Company Hierarchy</h3>
+    <pre><code>Barclays PLC
+  ├── Barclays UK (Tier 1)
+  │   ├── Barclays Digital Marketing (Tier 2)
+  │   └── Barclays Consumer Banking (Tier 2)
+  └── Barclays US (Tier 1)
+      ├── Barclays Wealth Management (Tier 2)
+  </code></pre>
+    <p>Jane Doe is employed by <strong>Barclays Digital Marketing</strong>, two levels down from the global parent.</p>
+  
+    <h3>Step-by-Step Evaluation in SQL</h3>
+    <ol>
+      <li><strong>Start at the Candidate’s Employer:</strong> The system identifies that Jane is employed at "Barclays Digital Marketing".</li>
+      <li><strong>Climb the Hierarchy:</strong> A recursive stored procedure walks up the hierarchy from "Barclays Digital Marketing" → "Barclays UK" → "Barclays PLC".</li>
+      <li><strong>Fetch Restriction Records:</strong> For each company in this chain, the system joins against the <code>Restrictions</code>, <code>Reservations</code>, and <code>DoNotContact</code> tables.</li>
+      <li><strong>Evaluate Roles and Time Windows:</strong>
+        <ul>
+          <li>Checks if marketing roles are restricted at any level of the hierarchy.</li>
+          <li>Verifies that the restriction is active and not expired.</li>
+          <li>Matches Jane’s job title or function against exclusion rules.</li>
+          <li>Considers whether she was involved in recent placements triggering a cooling-off period.</li>
+        </ul>
+      </li>
+      <li><strong>Return Restriction Status:</strong> If any restriction condition is met at any level, Jane is <strong>flagged as restricted</strong>, and the consultant is warned not to proceed.</li>
+    </ol>
+  
+    <h3>Why This Is a Problem</h3>
+    <ul>
+      <li>This recursive join occurs <strong>millions of times per day</strong>, even if nothing has changed.</li>
+      <li>Pattern checks are repeated constantly.</li>
+      <li>Companies like Barclays can have <strong>10+ layers</strong> of hierarchy, increasing compute cost.</li>
+      <li>Logic is fragmented across tables and functions, making it <strong>hard to maintain and optimize</strong>.</li>
+    </ul>
+  </section>
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 </p><p>  Restrictions could be set at individual or company-wide levels, requiring continuous post-processing jobs to check for changes like role movements, departures, or new assignments.
@@ -65,7 +131,33 @@
   <p>The complexity and scale occasionally led to delays, risking consultants contacting restricted individuals before flags were updated—potentially breaching legal contracts.. The failures weren't caused by technical debt — they stem from fundamental design decisions. I originally architected Restrictions as a relational model within SQL Server, but as the product and its business logic have evolved, I’ve come to the conclusion that we are using the wrong technology for the job.</p>
 
 
-
+  <section id="csharp-cumbersome">
+    <h3>❗ Why This Is Cumbersome to Do in C#</h3>
+    <p>
+      At first glance, it might seem tempting to replicate the SQL restriction logic in C# using Entity Framework or raw SQL queries. However, this quickly becomes impractical and difficult to maintain for several reasons:
+    </p>
+    <ul>
+      <li>
+        <strong>Object-Relational Mapping Complexity:</strong> Modeling recursive company hierarchies in C# via an ORM like Entity Framework leads to deep nesting, circular references, or inefficient lazy loading. These relationships are a poor fit for traditional object graphs.
+      </li>
+      <li>
+        <strong>Manual Recursion and State Tracking:</strong> Tree traversal in C# must be implemented by hand, including mechanisms to prevent infinite loops or stack overflows. This adds considerable boilerplate and risk of logic errors.
+      </li>
+      <li>
+        <strong>Business Rule Explosion:</strong> Each restriction type has different criteria (e.g., title, tenure, function, location). This leads to scattered logic across multiple classes or deeply nested <code>if</code>/<code>else</code> blocks, making testing and validation difficult.
+      </li>
+      <li>
+        <strong>Loss of Declarative Simplicity:</strong> SQL allows expressing queries in a concise, declarative form. C# forces you into an imperative approach, where each step and condition must be explicitly coded. This bloats the codebase and reduces clarity.
+      </li>
+      <li>
+        <strong>Performance Bottlenecks:</strong> What SQL can do in a set-based operation, C# may attempt to do with row-by-row evaluation. This N+1 problem severely impacts performance at scale—especially when dealing with millions of candidates and daily evaluations.
+      </li>
+    </ul>
+    <p>
+      While C# offers flexibility, its use here would shift complexity from the data model into application logic—introducing new classes of bugs, reducing transparency, and making the system harder to evolve.
+    </p>
+  </section>
+  
 
 
 
@@ -220,6 +312,18 @@
 <p>I architected the current solution, and I’ve lived through every production incident that followed. I now believe that fully migrating Restrictions to a graph database — powered by clean event streaming from our transactional system — is the only way to close this out with confidence.</p>
 
 <p>This move would modernize the product, improve accuracy, reduce dev effort, and future-proof the platform. It’s the right design for the logic we now own.</p>
+
+
+
+
+<section id="conclusion">
+  <h2>✅ Conclusion</h2>
+  <p>
+    This journey exposed a fundamental misalignment between the system’s growing complexity and the relational model underpinning it. What began as a manageable rules engine gradually evolved into a fragile lattice of stored procedures, temporal logic, and recursive joins. The business problem—evaluating dynamic, multi-dimensional restrictions—demands a data model that mirrors those relationships. A graph-based approach offers the opportunity to model that complexity directly, reduce execution overhead, and deliver clearer logic that’s easier to evolve. <strong>Rethinking Restrictions</strong> isn’t just a technical refactor—it’s a structural realignment between business semantics and system design.
+  </p>
+</section>
+
+
 
 <hr>
 <p><em>Authored by John Murphy • GitHub: [your-handle] • LinkedIn: [your-link]</em></p>
