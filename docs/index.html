@@ -48,150 +48,151 @@
 
 <h1>Rethinking Restrictions: From SQL to Graph</h1>
 
-<h2>Introduction</h2>`
-<p>
-  This post explains the evolution of a mission-critical system built to enforce hiring restrictions at a global executive recruitment firm. It dives into the technical challenges of modeling restrictions across large hierarchical companies and why traditional relational models proved inadequate.
+<section id="introduction">
+  <h2>Introduction</h2>
+  <p>
+    What began as a simple legal safeguard for a recruitment firm quickly evolved into one of the most computationally expensive and complex systems in the company.
+    The Restrictions engine, originally built on SQL Server, was designed to answer a seemingly simple question: <strong>"Can we contact this person about this role?"</strong>
+  </p>
+  <p>
+    As the firm expanded its footprint globally, so did the volume, variety, and complexity of the restrictions that had to be checked.
+    The engine now supports over 22 distinct restriction types, must evaluate candidates across deeply nested global company hierarchies,
+    and processes millions of checks per day. This document details how the relational model started to break down under that weight —
+    and why a rethink of the system’s architecture became necessary.
+  </p>
+</section>
 
-</p>
+<section id="what-are-restrictions">
+  <h2>What Are “Restrictions”?</h2>
+  <p>
+    At its core, a restriction is any condition that would make it inappropriate — legally, ethically, or contractually — to contact a specific individual about a specific opportunity.
+    Restrictions can be temporary or permanent, explicit or implied, and are derived from both external contracts and internal business logic.
+  </p>
+  <p>Examples include:</p>
+  <ul>
+    <li><strong>Off-Limits:</strong> A blanket rule disallowing contact with all employees in a specific function or division of a client company.</li>
+    <li><strong>Reservations:</strong> Soft holds placed on individuals or companies during active assignments.</li>
+    <li><strong>Direct Restrictions:</strong> Personal-level constraints like “Do Not Contact,” “Do Not Place,” or “Conversation Required.”</li>
+    <li><strong>Role-based Filters:</strong> Specific job functions or titles that are contractually protected (e.g., all Marketing Directors in a particular division).</li>
+    <li><strong>Temporal Limits:</strong> Restrictions that depend on time windows — e.g., “do not reapproach this candidate for 6 months after prior placement.”</li>
+  </ul>
+  <p>
+    These rules interact with one another in non-trivial ways, often involving combinations of role history, reporting structures, subsidiary relationships, and past assignment activity.
+    At scale, this demands a system that can dynamically evaluate many-to-many relationships across both people and companies.
+  </p>
+</section>
 
-<p>
-  A “restriction” refers to a contractual or ethical limitation on who can be contacted. These fall into categories such as “Do Not Contact” (e.g., for legal reasons), “Reservation” (temporary holds), or “Off-Limits” (e.g., due to recent business engagements).
-</p>
-<p>One of the most complex projects I worked on was the Restrictions system at a global executive recruitment firm. </p> 
-<p>The system was designed to enforce legal and reputational safeguards by ensuring the firm did not contact individuals covered by contractual hiring restrictions. </p>
-<p>For example, if hired to find a CEO for a multinational bank like Barclays, the firm might agree not to approach any marketing managers globally for a set duration.
-</p>
-<p>While the front-end representation was a simple restriction flag, the back-end logic was highly complex. The system had to process deeply nested company hierarchies and normalized relational database structures, tracking roles, departments, and job histories of individuals.
-
-  <img src="assets/company-structure.png" alt="Company Structure">
-
-  <section id="example-walkthrough">
-    <h2>Example Walkthrough: Evaluating a Restriction</h2>
-  
-    <p>Let’s walk through a real-world scenario to illustrate how the current system determines whether a candidate is restricted from contact.</p>
-  
-    <h3>Scenario</h3>
-    <p>Your firm has been engaged to find the new <strong>Chief Marketing Officer</strong> for a major client: <strong>Barclays PLC</strong>. Before reaching out to any candidates, the system must confirm that the person is not restricted. One of the potential candidates is <strong>Jane Doe</strong>, currently a <em>Marketing Director at Barclays UK</em>.</p>
-  
-    <h3>Company Hierarchy</h3>
-    <pre><code>Barclays PLC
-  ├── Barclays UK (Tier 1)
-  │   ├── Barclays Digital Marketing (Tier 2)
-  │   └── Barclays Consumer Banking (Tier 2)
-  └── Barclays US (Tier 1)
-      ├── Barclays Wealth Management (Tier 2)
-  </code></pre>
-    <p>Jane Doe is employed by <strong>Barclays Digital Marketing</strong>, two levels down from the global parent.</p>
-  
-    <h3>Step-by-Step Evaluation in SQL</h3>
-    <ol>
-      <li><strong>Start at the Candidate’s Employer:</strong> The system identifies that Jane is employed at "Barclays Digital Marketing".</li>
-      <li><strong>Climb the Hierarchy:</strong> A recursive stored procedure walks up the hierarchy from "Barclays Digital Marketing" → "Barclays UK" → "Barclays PLC".</li>
-      <li><strong>Fetch Restriction Records:</strong> For each company in this chain, the system joins against the <code>Restrictions</code>, <code>Reservations</code>, and <code>DoNotContact</code> tables.</li>
-      <li><strong>Evaluate Roles and Time Windows:</strong>
-        <ul>
-          <li>Checks if marketing roles are restricted at any level of the hierarchy.</li>
-          <li>Verifies that the restriction is active and not expired.</li>
-          <li>Matches Jane’s job title or function against exclusion rules.</li>
-          <li>Considers whether she was involved in recent placements triggering a cooling-off period.</li>
-        </ul>
-      </li>
-      <li><strong>Return Restriction Status:</strong> If any restriction condition is met at any level, Jane is <strong>flagged as restricted</strong>, and the consultant is warned not to proceed.</li>
-    </ol>
-  
-    <h3>Why This Is a Problem</h3>
-    <ul>
-      <li>This recursive join occurs <strong>millions of times per day</strong>, even if nothing has changed.</li>
-      <li>Pattern checks are repeated constantly.</li>
-      <li>Companies like Barclays can have <strong>10+ layers</strong> of hierarchy, increasing compute cost.</li>
-      <li>Logic is fragmented across tables and functions, making it <strong>hard to maintain and optimize</strong>.</li>
-    </ul>
-  </section>
-  
+<section id="architecture">
+  <h2>Current Architecture: SQL Server</h2>
+  <p>
+    The existing implementation of Restrictions is built on SQL Server, leveraging a pair of master stored procedures that orchestrate hundreds of joins, filters, and recursive calls.
+  </p>
+  <h3>Key Characteristics:</h3>
+  <ul>
+    <li>The system performs <strong>recursive traversal</strong> of company hierarchies using common table expressions (CTEs) to identify parent-child chains.</li>
+    <li>It joins across <strong>employment history, job titles, industry classifications</strong>, and assignment activity.</li>
+    <li>All evaluations are <strong>recomputed on demand</strong>, even when underlying data hasn't changed.</li>
+    <li>Multiple filters must be checked per invocation — ranging from title exclusions to cooling-off periods.</li>
+  </ul>
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-</p><p>  Restrictions could be set at individual or company-wide levels, requiring continuous post-processing jobs to check for changes like role movements, departures, or new assignments.
-  
-  This processing logic had to account for both company-down and person-up evaluations, and was prone to issues like recursive references and long-running SQL Server jobs, which sometimes caused performance bottlenecks or P1 incidents. </p> 
-  
-  <p>The complexity and scale occasionally led to delays, risking consultants contacting restricted individuals before flags were updated—potentially breaching legal contracts.. The failures weren't caused by technical debt — they stem from fundamental design decisions. I originally architected Restrictions as a relational model within SQL Server, but as the product and its business logic have evolved, I’ve come to the conclusion that we are using the wrong technology for the job.</p>
-
-
-  <section id="csharp-cumbersome">
-    <h3>❗ Why This Is Cumbersome to Do in C#</h3>
+  <section id="example">
+    <h2>Illustrative Example</h2>
     <p>
-      At first glance, it might seem tempting to replicate the SQL restriction logic in C# using Entity Framework or raw SQL queries. However, this quickly becomes impractical and difficult to maintain for several reasons:
+      Imagine a consultant is tasked with finding a new Chief Marketing Officer for <strong>Barclays PLC</strong>.
+      The candidate under consideration, Jane Doe, is currently employed as a Marketing Director at <strong>Barclays Digital Marketing</strong>,
+      which is two levels down in the organizational hierarchy.
     </p>
+    <p>The Restrictions engine must:</p>
     <ul>
-      <li>
-        <strong>Object-Relational Mapping Complexity:</strong> Modeling recursive company hierarchies in C# via an ORM like Entity Framework leads to deep nesting, circular references, or inefficient lazy loading. These relationships are a poor fit for traditional object graphs.
-      </li>
-      <li>
-        <strong>Manual Recursion and State Tracking:</strong> Tree traversal in C# must be implemented by hand, including mechanisms to prevent infinite loops or stack overflows. This adds considerable boilerplate and risk of logic errors.
-      </li>
-      <li>
-        <strong>Business Rule Explosion:</strong> Each restriction type has different criteria (e.g., title, tenure, function, location). This leads to scattered logic across multiple classes or deeply nested <code>if</code>/<code>else</code> blocks, making testing and validation difficult.
-      </li>
-      <li>
-        <strong>Loss of Declarative Simplicity:</strong> SQL allows expressing queries in a concise, declarative form. C# forces you into an imperative approach, where each step and condition must be explicitly coded. This bloats the codebase and reduces clarity.
-      </li>
-      <li>
-        <strong>Performance Bottlenecks:</strong> What SQL can do in a set-based operation, C# may attempt to do with row-by-row evaluation. This N+1 problem severely impacts performance at scale—especially when dealing with millions of candidates and daily evaluations.
-      </li>
+      <li>Traverse the hierarchy upward from “Barclays Digital Marketing” to “Barclays UK” to “Barclays PLC.”</li>
+      <li>Check each node in the hierarchy for any active off-limits rules, role-based filters, or time-based restrictions.</li>
+      <li>Match Jane’s current title, historical titles, and reporting lines against all active exclusions.</li>
+      <li>Check whether Jane is under a reservation due to an unrelated active assignment.</li>
+      <li>Reconcile her candidate ID with past placements and conversation tracking logs.</li>
     </ul>
     <p>
-      While C# offers flexibility, its use here would shift complexity from the data model into application logic—introducing new classes of bugs, reducing transparency, and making the system harder to evolve.
+      On paper, this is a tree traversal problem. But in SQL, it’s expressed via recursive joins and filter logic spread across dozens of views and functions.
     </p>
   </section>
   
 
 
 
-<p>In this post, I walk through the evolution of Restrictions, the current architecture, and the challenges that arise from trying to simulate graph traversal using a relational model. Then, I present a compelling case for moving Restrictions into a graph database — a model far more suited to the relationships and reasoning this product depends on.</p>
+  <h2>Simple Question</h2>
 
-<h2>Background</h2>
-<p>Restrictions is one of the most business-critical features within Quest. It protects us from reputational and legal risk by ensuring our consultants do not engage with individuals who are off-limits, under embargo, or already engaged. It began with a simple goal — determine if someone is restricted — but the business logic has expanded significantly. We now support over 22 types of restrictions and must handle complex cases like reservations, job functionality, company structures, and M&A-driven hierarchy changes.</p>
-
-<p>The original system relied on SQL stored procedures to infer restriction state by joining large numbers of tables with temporal and conditional logic. This worked when the problem was small. But today, it’s clear that SQL Server is fundamentally unsuited to accurately, consistently, and efficiently answering the question: <em>“Is this person restricted right now?”</em></p>
-
-<h2>Current Architecture and Challenges</h2>
-<p>The current system uses two master stored procedures — one for people, one for companies — which recursively join tables, traverse parent/child company relationships, and recalculate every restriction every time. This includes:</p>
-<ul>
-  <li>OffLimits rules based on company, job function, or job category</li>
-  <li>Reservations linked via assignments or roles</li>
-  <li>Direct Restrictions like Do Not Contact or Conversation Required</li>
-</ul>
-
-
-<h2>Simple Question</h2>
-
-<p>Asking asimple question such as - is a given person restricted based upon their status within a company assessment led to the following SQL logic being executed</p>
+  <p>Asking asimple question such as - is a given person restricted based upon their status within a company assessment led to the following SQL logic being executed</p>
+  
+  
+  <img src="assets/existing-logic.png" alt="Company Structure">
+  
+  <p>Within this query, we had 9 tables, 19 business process categories, 2 business process role status category codes, 2 personrestrictioncategory codes
+  </p>
+  
+  <p>This type of logic was typical of using TSQL to solve the problem - bear in mind that there were 21 types of restriction to apply to a person. So any lateral career move by an individual resulted in 21 stored procedures like this being executed, and there were 10s of thousands of Person changes in our system every day</p>
+  
+  <p>I performed an analysis that revealed that on a typical day, we had 25 million invocations of one of our central SQL Functions used in restrictions, and it resulted in just 373 updates to our system</p>
+  
+  <img src="assets/twenty-five-million-executions.png" alt="twenty million executions">
+  
+  
 
 
-<img src="assets/existing-logic.png" alt="Company Structure">
 
-<p>Within this query, we had 9 tables, 19 business process categories, 2 business process role status category codes, 2 personrestrictioncategory codes
-</p>
 
-<p>This type of logic was typical of using TSQL to solve the problem - bear in mind that there were 21 types of restriction to apply to a person. So any lateral career move by an individual resulted in 21 stored procedures like this being executed, and there were 10s of thousands of Person changes in our system every day</p>
+  <p>
+    This works — just barely — for small companies. But many client firms are global enterprises with thousands of subsidiaries,
+    multiple reporting levels, and complex internal legal structures (e.g., "Barclays UK Ltd" versus "Barclays Ireland DAC").
+    The system must also reconcile different identifiers for the same person, handle multi-role employment, and track overlapping reservation windows.
+  </p>
+</section>
 
-<p>I performed an analysis that revealed that on a typical day, we had 25 million invocations of one of our central SQL Functions used in restrictions, and it resulted in just 373 updates to our system</p>
 
-<img src="assets/twenty-five-million-executions.png" alt="twenty million executions">
+<section id="performance">
+  <h2>Performance Bottlenecks</h2>
+  <p>
+    A performance audit revealed the system was executing over <strong>25 million function calls per day</strong>, yet only ~370 records were meaningfully updated.
+    The remaining operations were reevaluations of unchanged data or redundant traversals across unchanged hierarchies.
+  </p>
+  <p>
+    The stored procedures themselves became <strong>monolithic and opaque</strong>, containing large case statements, temporary tables, and dynamic SQL segments
+    that are difficult to tune, explain, or test. Because all restriction types are centrally evaluated — even when not relevant to the query —
+    computational overhead is massive.
+  </p>
+  <p>SQL’s set-based strengths begin to collapse when:</p>
+  <ul>
+    <li>Data must be filtered based on time-scoped logic (e.g., “current role,” “within past 180 days”).</li>
+    <li>Recursive lookups involve thousands of hierarchical joins.</li>
+    <li>Business rules require pattern matching across job functions (e.g., fuzzy title matching).</li>
+    <li>The absence of certain relationships must be explicitly asserted (e.g., “this person is not under any active restriction”).</li>
+  </ul>
+</section>
+
+<section id="why-csharp">
+  <h2>Why a C# Rewrite Doesn’t Solve It</h2>
+  <p>
+    At various points, migrating business logic to C# was considered. But this only moves the problem — it doesn’t solve it.
+  </p>
+  <h3>Why C# Becomes Cumbersome:</h3>
+  <ul>
+    <li><strong>Manual Traversal Logic:</strong> You must reimplement tree-walking logic manually, along with caching, stack control, and visited-node tracking.</li>
+    <li><strong>Loss of Declarative Semantics:</strong> SQL allows expressing restrictions as pure logic (“what must be true?”), while C# demands procedural control flow (“how do I get there?”).</li>
+    <li><strong>State Explosion:</strong> Business rules that were once compact SQL filters now become deeply nested <code>if-else</code> structures, switch blocks, or polymorphic chains.</li>
+    <li><strong>ORM Friction:</strong> ORMs like Entity Framework are poorly suited to recursively loading hierarchies without causing N+1 issues or circular references.</li>
+    <li><strong>Complexity Shifting:</strong> Instead of simplifying the logic, a rewrite moves the complexity from the data layer into application code — spreading it across classes, functions, and middleware.</li>
+  </ul>
+  <p>
+    The net result is increased maintenance burden, slower feature iteration, and new classes of bugs introduced by duplicated logic.
+  </p>
+</section>
+
+
+
+
+
+
+
+
 
 
 
