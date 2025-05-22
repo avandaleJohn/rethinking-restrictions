@@ -49,7 +49,25 @@
 <h1>Rethinking Restrictions: From SQL to Graph</h1>
 
 <h2>Introduction</h2>
-<p>Over the past few years, the Restrictions product has been the source of repeated P1 production incidents, despite heavy investment in development and testing. These failures aren't caused by technical debt — they stem from fundamental design decisions. I originally architected Restrictions as a relational model within SQL Server, but as the product and its business logic have evolved, I’ve come to the conclusion that we are using the wrong technology for the job.</p>
+<p>One of the most complex projects I worked on was the Restrictions system at a global executive recruitment firm. </p> 
+<p>The system was designed to enforce legal and reputational safeguards by ensuring the firm did not contact individuals covered by contractual hiring restrictions. </p>
+<p>For example, if hired to find a CEO for a multinational bank like Barclays, the firm might agree not to approach any marketing managers globally for a set duration.
+</p>
+<p>While the front-end representation was a simple restriction flag, the back-end logic was highly complex. The system had to process deeply nested company hierarchies and normalized relational database structures, tracking roles, departments, and job histories of individuals.
+
+  <img src="assets/company-structure.png" alt="Company Structure">
+
+
+</p><p>  Restrictions could be set at individual or company-wide levels, requiring continuous post-processing jobs to check for changes like role movements, departures, or new assignments.
+  
+  This processing logic had to account for both company-down and person-up evaluations, and was prone to issues like recursive references and long-running SQL Server jobs, which sometimes caused performance bottlenecks or P1 incidents. </p> 
+  
+  <p>The complexity and scale occasionally led to delays, risking consultants contacting restricted individuals before flags were updated—potentially breaching legal contracts.. The failures weren't caused by technical debt — they stem from fundamental design decisions. I originally architected Restrictions as a relational model within SQL Server, but as the product and its business logic have evolved, I’ve come to the conclusion that we are using the wrong technology for the job.</p>
+
+
+
+
+
 
 <p>In this post, I walk through the evolution of Restrictions, the current architecture, and the challenges that arise from trying to simulate graph traversal using a relational model. Then, I present a compelling case for moving Restrictions into a graph database — a model far more suited to the relationships and reasoning this product depends on.</p>
 
@@ -65,6 +83,25 @@
   <li>Reservations linked via assignments or roles</li>
   <li>Direct Restrictions like Do Not Contact or Conversation Required</li>
 </ul>
+
+
+<h2>Simple Question</h2>
+
+<p>Asking asimple question such as - is a given person restricted based upon their status within a company assessment led to the following SQL logic being executed</p>
+
+
+<img src="assets/existing-logic.png" alt="Company Structure">
+
+<p>Within this query, we had 9 tables, 19 business process categories, 2 business process role status category codes, 2 personrestrictioncategory codes
+</p>
+
+<p>This type of logic was typical of using TSQL to solve the problem - bear in mind that there were 21 types of restriction to apply to a person. So any lateral career move by an individual resulted in 21 stored procedures like this being executed, and there were 10s of thousands of Person changes in our system every day</p>
+
+<p>I performed an analysis that revealed that on a typical day, we had 25 million invocations of one of our central SQL Functions used in restrictions, and it resulted in just 373 updates to our system</p>
+
+<img src="assets/twenty-five-million-executions.png" alt="twenty million executions">
+
+
 
 <p>This approach has major downsides:</p>
 <ul>
@@ -82,7 +119,8 @@
 <p>Every production incident over the past three years has followed a familiar theme: the system fails to recognize a restriction due to complexity in traversing jobs, companies, and roles. These failures have high reputational impact and take considerable effort to debug.</p>
 
 <h2>Why Graph?</h2>
-<p>Graph databases are purpose-built for these kinds of problems. Instead of joining rows, they follow relationships. Nodes represent people, companies, jobs, restrictions. Relationships like <code>WORKS_AT</code>, <code>PLACED_IN</code>, or <code>COVERED_BY</code> explicitly model the connections we care about.</p>
+<p>Graph databases are purpose-built for these kinds of problems. Graph databases hold the relationships between data as a priority
+  Instead of joining rows, they follow relationships. Nodes represent people, companies, jobs, restrictions. Relationships like <code>WORKS_AT</code>, <code>PLACED_IN</code>, or <code>COVERED_BY</code> explicitly model the connections we care about.</p>
 
 <p>Traversal in a graph is lightweight and constant-time per hop — whether you're 2 or 20 levels deep in a company structure. We don’t have to re-derive anything. We just ask: <em>“Can I navigate from this Person node to a Restriction node?”</em> If yes, the person is restricted.</p>
 
@@ -150,10 +188,20 @@
 <h2>Real-World Example</h2>
 <p>In Neo4j, we can model a Person who holds a Job at a Company. That company is part of a parent hierarchy, and at the top sits a Worldwide OffLimit. If all nodes and relationships are in place, the graph tells us this person is covered — no stored proc required.</p>
 
+
+<img src="assets/worldwide-restrictions.png">
+
+
+
 <p>When a job ends, we remove that node — the graph updates automatically. When a WWOL expires, we remove the edge — all associated people are instantly unaffected. No reprocessing. No snapshot table. No recursion.</p>
 
 <h2>Operationalizing This</h2>
 <p>We would use Event Streaming from SQL Server to maintain the graph. Only relevant changes (e.g. job current flag toggles) would trigger updates. Graph changes are fast, append-only, and logged. I’ve already used this approach in EventStream to map foreign key relationships to root entities.</p>
+
+
+
+<img src="assets/serverless-pipeline.png" >
+
 
 <p>Neo4j is the ideal fit for this. It’s mature, widely supported, and already proven in our environment. We could host it ourselves or use GrapheneDB as a managed provider. The existing restriction APIs could be refactored to call the graph service directly, removing the need for persistent badge tables or recalculation logic.</p>
 
