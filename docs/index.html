@@ -95,7 +95,6 @@
     <li>Multiple filters must be checked per invocation — ranging from title exclusions to cooling-off periods.</li>
   </ul>
 
-
   <section id="example">
     <h2>Illustrative Example</h2>
     <p>
@@ -103,6 +102,12 @@
       The candidate under consideration, Jane Doe, is currently employed as a Marketing Director at <strong>Barclays Digital Marketing</strong>,
       which is two levels down in the organizational hierarchy.
     </p>
+
+
+<img src="assets/company-structure.png" >
+
+
+
     <p>The Restrictions engine must:</p>
     <ul>
       <li>Traverse the hierarchy upward from “Barclays Digital Marketing” to “Barclays UK” to “Barclays PLC.”</li>
@@ -289,14 +294,18 @@
 <p>When a job ends, we remove that node — the graph updates automatically. When a WWOL expires, we remove the edge — all associated people are instantly unaffected. No reprocessing. No snapshot table. No recursion.</p>
 
 <h2>Operationalizing This</h2>
-<p>We would use Event Streaming from SQL Server to maintain the graph. Only relevant changes (e.g. job current flag toggles) would trigger updates. Graph changes are fast, append-only, and logged. I’ve already used this approach in EventStream to map foreign key relationships to root entities.</p>
+<p>We used Event Streaming from SQL Server to maintain the graph.</p> 
+
+<p>For details on this, see: <a href="https://avandalejohn.github.io/event-stream/" target="_blank">Building an Event Streaming System for Distributed Change Processing</a></p>
+
+<p>Only relevant changes (e.g. job current flag toggles) would trigger updates. Graph changes are fast, append-only, and logged. I’ve already used this approach in EventStream to map foreign key relationships to root entities.</p>
 
 
 
 <img src="assets/serverless-pipeline.png" >
 
 
-<p>Neo4j is the ideal fit for this. It’s mature, widely supported, and already proven in our environment. We could host it ourselves or use GrapheneDB as a managed provider. The existing restriction APIs could be refactored to call the graph service directly, removing the need for persistent badge tables or recalculation logic.</p>
+<p>Neo4j was the ideal fit for this. It’s mature, widely supported, and already proven in our environment. We could host it ourselves or use GrapheneDB as a managed provider. The existing restriction APIs could be refactored to call the graph service directly, removing the need for persistent badge tables or recalculation logic.</p>
 
 <h2>Why This Is the Right Move</h2>
 <ul>
@@ -306,15 +315,6 @@
   <li><strong>It’s scalable</strong>: restrictions logic remains constant even as data grows</li>
   <li><strong>It’s finished</strong>: we stop playing whack-a-mole with edge cases</li>
 </ul>
-
-<h2>Conclusion</h2>
-<p>The current Restrictions system is a patchwork of stored procedures, recursive joins, runtime recalculation, and workaround flags. We’ve stretched the relational model beyond what it was designed for. Restrictions is a graph problem, and we should solve it with graph technology.</p>
-
-<p>I architected the current solution, and I’ve lived through every production incident that followed. I now believe that fully migrating Restrictions to a graph database — powered by clean event streaming from our transactional system — is the only way to close this out with confidence.</p>
-
-<p>This move would modernize the product, improve accuracy, reduce dev effort, and future-proof the platform. It’s the right design for the logic we now own.</p>
-
-
 
 
 <section id="conclusion">
@@ -327,7 +327,7 @@
 
 
 <hr>
-<p><em>Authored by John Murphy • GitHub: [your-handle] • LinkedIn: [your-link]</em></p>
+
 
 </body>
 </html>
