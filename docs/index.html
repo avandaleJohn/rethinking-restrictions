@@ -302,7 +302,83 @@
 
 
 
+
+
+
+
+<h1>Deep Dive: Real-Time Syncing from SQL Server to Neo4j using AWS Serverless Components</h1>
+
 <img src="assets/serverless-pipeline.png" >
+
+  <p>This section breaks down the serverless pipeline used to sync SQL Server change events into Neo4j in real time. Let’s walk through the architecture step by step:</p>
+
+  <h2>Step 1: Change Data Capture and Kinesis Stream Ingestion via AWS DMS</h2>
+  <p>At the heart of this system is <strong>AWS Database Migration Service (DMS)</strong>. It connects to an <strong>Amazon RDS SQL Server Standard Edition</strong> instance and monitors a source table for changes using <strong>SQL Server Change Data Capture (CDC)</strong>.</p>
+  <ul>
+    <li>Each change (insert, update, delete) is picked up by the DMS task.</li>
+    <li>These row-level changes are serialized into <strong>JSON-formatted Kinesis Records</strong> and emitted into an <strong>Amazon Kinesis Data Stream</strong>.</li>
+    <li>The DMS task is configured with a private IP and IAM role for secure VPC access.</li>
+  </ul>
+  <p><strong>Important prerequisites:</strong></p>
+  <ul>
+    <li>CDC must be enabled on the source table.</li>
+    <li>The migration task must define the target as <code>Kinesis</code>, not another database.</li>
+  </ul>
+
+  <h2>Step 2: Lambda Function for Neo4j Insertion</h2>
+  <p>Every time a record enters the Kinesis Data Stream, a <strong>Lambda function is invoked per event</strong>.</p>
+  <ul>
+    <li>This function is designed to <strong>convert the JSON payload into a CYPHER statement</strong> — Neo4j’s graph query language.</li>
+    <li>Example operation:</li>
+  </ul>
+  <pre><code>MERGE (p:Person {id:1234})  
+SET p.name = 'Alice', p.status = 'Active'</code></pre>
+  <p>This abstracts SQL-like row updates into relationship-aware graph operations.</p>
+
+  <h2>Step 3: Secure Retrieval of Neo4j Connection Details</h2>
+  <p>To ensure security and avoid hardcoding credentials:</p>
+  <ul>
+    <li>The Lambda fetches the <strong>Neo4j endpoint, credentials, and tokens</strong> from <strong>AWS Systems Manager Parameter Store</strong>.</li>
+    <li>Parameters are encrypted and access-controlled via IAM policies scoped to the Lambda.</li>
+  </ul>
+  <p>This supports dynamic configuration without redeployments.</p>
+
+  <h2>Step 4: Parallel CSV Archival to Amazon S3 via Firehose</h2>
+  <p>While Neo4j is updated in real time, a <strong>parallel stream</strong> processes each event:</p>
+  <ul>
+    <li>The same record is pushed to <strong>Amazon Kinesis Data Firehose</strong>.</li>
+    <li>A transform Lambda (optional) converts the JSON into <strong>CSV line format</strong>.</li>
+    <li>The output is persisted in <strong>Amazon S3</strong> for archival and backup.</li>
+  </ul>
+  <p>This provides a durable log of all changes, decoupled from the graph operations.</p>
+
+  <h2>Step 5: Bootstrap and Recovery via S3 and Lambda</h2>
+  <p>In a failover or disaster recovery scenario:</p>
+  <ul>
+    <li>A <strong>Bootstrap Lambda function</strong> rehydrates Neo4j by reading the CSV archive from S3.</li>
+    <li>It parses CSV rows back into CYPHER and updates Neo4j.</li>
+    <li>Connection details are again pulled from <strong>Parameter Store</strong>.</li>
+  </ul>
+  <p>This enables <strong>stateless recovery</strong> without reprocessing SQL Server logs.</p>
+
+  <h2>Summary of Benefits</h2>
+  <ul>
+    <li>Auto-scaled ingestion and compute with Kinesis and Lambda.</li>
+    <li>Secure credential management with Parameter Store.</li>
+    <li>Graph-native modeling using Neo4j.</li>
+    <li>Durable backup via Firehose and S3.</li>
+  </ul>
+  <p>This is a scalable, resilient, and modular example of <strong>event-driven architecture bridging relational and graph paradigms</strong>.</p>
+
+
+
+
+
+
+
+
+
+
 
 
 <p>Neo4j was the ideal fit for this. It’s mature, widely supported, and already proven in our environment. We could host it ourselves or use GrapheneDB as a managed provider. The existing restriction APIs could be refactored to call the graph service directly, removing the need for persistent badge tables or recalculation logic.</p>
